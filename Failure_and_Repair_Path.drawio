@@ -1,0 +1,116 @@
+<mxfile host="app.diagrams.net" agent="ChatGPT">
+  <diagram name="Failure_and_Repair_Path" id="Failure_and_Repair_Path">
+    <mxGraphModel dx="3797" dy="1709" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="start" parent="1" style="ellipse;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#00CC00;strokeWidth=0;fontSize=14;" value="Start" vertex="1">
+          <mxGeometry height="55" width="90" x="705" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="hb" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Storage nodes send periodic heartbeats" vertex="1">
+          <mxGeometry height="65" width="280" x="610" y="125" as="geometry" />
+        </mxCell>
+        <mxCell id="timeout" parent="1" style="rhombus;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#FF8000;fontSize=13;" value="Heartbeat missing for 15 seconds?" vertex="1">
+          <mxGeometry height="95" width="210" x="645" y="245" as="geometry" />
+        </mxCell>
+        <mxCell id="healthy" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Node stays healthy; continue monitoring" vertex="1">
+          <mxGeometry height="70" width="280" x="190" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="failed" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Mark node unhealthy in active node list" vertex="1">
+          <mxGeometry height="65" width="290" x="605" y="400" as="geometry" />
+        </mxCell>
+        <mxCell id="client" parent="1" style="rhombus;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#FF8000;fontSize=13;" value="Read requested during failure?" vertex="1">
+          <mxGeometry height="95" width="200" x="650" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="read" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Try surviving verified replicas; require R=2" vertex="1">
+          <mxGeometry height="75" width="310" x="1040" y="535" as="geometry" />
+        </mxCell>
+        <mxCell id="repair" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Automatic repair enabled or manual /cluster/repair called" vertex="1">
+          <mxGeometry height="75" width="330" x="585" y="690" as="geometry" />
+        </mxCell>
+        <mxCell id="enough" parent="1" style="rhombus;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#FF8000;fontSize=13;" value="At least 3 healthy nodes available?" vertex="1">
+          <mxGeometry height="95" width="210" x="645" y="820" as="geometry" />
+        </mxCell>
+        <mxCell id="wait" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Wait for recovery / sufficient nodes" vertex="1">
+          <mxGeometry height="65" width="290" x="1040" y="835" as="geometry" />
+        </mxCell>
+        <mxCell id="source" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Find a healthy SHA-256 verified chunk copy" vertex="1">
+          <mxGeometry height="70" width="320" x="590" y="1100" as="geometry" />
+        </mxCell>
+        <mxCell id="exists" parent="1" style="rhombus;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#FF8000;fontSize=13;" value="Valid source available?" vertex="1">
+          <mxGeometry height="95" width="200" x="650" y="1220" as="geometry" />
+        </mxCell>
+        <mxCell id="report" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Report failed repair; avoid unsafe reconstruction" vertex="1">
+          <mxGeometry height="70" width="300" x="1030" y="1235" as="geometry" />
+        </mxCell>
+        <mxCell id="put" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="PUT missing replicas to current ring targets" vertex="1">
+          <mxGeometry height="70" width="330" x="585" y="1370" as="geometry" />
+        </mxCell>
+        <mxCell id="verify" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Check write success and updated replica availability" vertex="1">
+          <mxGeometry height="75" width="330" x="585" y="1490" as="geometry" />
+        </mxCell>
+        <mxCell id="end" parent="1" style="ellipse;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#00CC00;strokeWidth=0;fontSize=14;" value="End" vertex="1">
+          <mxGeometry height="70" width="90" x="690" y="1620" as="geometry" />
+        </mxCell>
+        <mxCell id="edge0" edge="1" parent="1" source="start" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="hb" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge1" edge="1" parent="1" source="hb" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="timeout" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge2" edge="1" parent="1" source="timeout" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="healthy" value="No">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge3" edge="1" parent="1" source="timeout" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="failed" value="Yes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge4" edge="1" parent="1" source="failed" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="client" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge6" edge="1" parent="1" source="client" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="repair" value="No / after read">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge7" edge="1" parent="1" source="read" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="repair" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="Zn0FyHX71Xf0CMW5Eae8-1" connectable="0" parent="edge7" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];inheritText=1;" value="Yes" vertex="1">
+          <mxGeometry relative="1" x="-0.513" y="-1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge8" edge="1" parent="1" source="repair" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="enough" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge9" edge="1" parent="1" source="enough" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="wait" value="No">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge10" edge="1" parent="1" source="enough" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" value="Yes">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="750" y="970" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge12" edge="1" parent="1" source="source" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="exists" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge13" edge="1" parent="1" source="exists" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="report" value="No">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge14" edge="1" parent="1" source="exists" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="put" value="Yes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge15" edge="1" parent="1" source="put" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="verify" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge16" edge="1" parent="1" source="verify" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="end" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="Zn0FyHX71Xf0CMW5Eae8-3" edge="1" parent="1" source="Zn0FyHX71Xf0CMW5Eae8-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;" target="source" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="Zn0FyHX71Xf0CMW5Eae8-2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Find referenced chunk hashes in PostgreSQL" vertex="1">
+          <mxGeometry height="65" width="290" x="610" y="970" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

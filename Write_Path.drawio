@@ -1,0 +1,99 @@
+<mxfile host="app.diagrams.net" agent="ChatGPT">
+  <diagram name="Write_Path" id="Write_Path">
+    <mxGraphModel dx="3213" dy="1446" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="start" parent="1" style="ellipse;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#00CC00;strokeWidth=0;fontSize=14;" value="Start" vertex="1">
+          <mxGeometry height="55" width="90" x="705" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="request" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Client uploads object" vertex="1">
+          <mxGeometry height="65" width="260" x="620" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="auth" parent="1" style="rhombus;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#FF8000;fontSize=13;" value="API key valid and rate limit OK?" vertex="1">
+          <mxGeometry height="95" width="200" x="650" y="225" as="geometry" />
+        </mxCell>
+        <mxCell id="err" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Return 401 / 429 error" vertex="1">
+          <mxGeometry height="60" width="230" x="1050" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="bucket" parent="1" style="rhombus;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#FF8000;fontSize=13;" value="Bucket exists?" vertex="1">
+          <mxGeometry height="95" width="200" x="650" y="370" as="geometry" />
+        </mxCell>
+        <mxCell id="notfound" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Return 404" vertex="1">
+          <mxGeometry height="60" width="220" x="1050" y="385" as="geometry" />
+        </mxCell>
+        <mxCell id="split" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Read upload in chunks (fixed size / CDC if enabled)" vertex="1">
+          <mxGeometry height="70" width="300" x="600" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="hash" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Compute SHA-256 for each chunk" vertex="1">
+          <mxGeometry height="65" width="260" x="620" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="replica" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Choose 3 target nodes via consistent hashing" vertex="1">
+          <mxGeometry height="70" width="300" x="600" y="760" as="geometry" />
+        </mxCell>
+        <mxCell id="write" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="PUT chunk to storage nodes" vertex="1">
+          <mxGeometry height="65" width="260" x="620" y="885" as="geometry" />
+        </mxCell>
+        <mxCell id="quorum" parent="1" style="rhombus;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#FF8000;fontSize=13;" value="At least 2 writes succeed?" vertex="1">
+          <mxGeometry height="95" width="200" x="650" y="1000" as="geometry" />
+        </mxCell>
+        <mxCell id="fail" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Return 503; write quorum failed" vertex="1">
+          <mxGeometry height="60" width="260" x="1030" y="1015" as="geometry" />
+        </mxCell>
+        <mxCell id="response" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Return object upload result" vertex="1">
+          <mxGeometry height="65" width="260" x="620" y="1280" as="geometry" />
+        </mxCell>
+        <mxCell id="end" parent="1" style="ellipse;whiteSpace=wrap;html=1;shapeInside=1;fillColor=#00CC00;strokeWidth=0;fontSize=14;" value="End" vertex="1">
+          <mxGeometry height="55" width="90" x="705" y="1390" as="geometry" />
+        </mxCell>
+        <mxCell id="edge0" edge="1" parent="1" source="start" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="request" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge1" edge="1" parent="1" source="request" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="auth" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge2" edge="1" parent="1" source="auth" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="err" value="No">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge3" edge="1" parent="1" source="auth" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="bucket" value="Yes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge4" edge="1" parent="1" source="bucket" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="notfound" value="No">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge5" edge="1" parent="1" source="bucket" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="split" value="Yes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge6" edge="1" parent="1" source="split" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="hash" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge7" edge="1" parent="1" source="hash" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="replica" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge8" edge="1" parent="1" source="replica" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="write" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge9" edge="1" parent="1" source="write" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="quorum" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge10" edge="1" parent="1" source="quorum" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="fail" value="No">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge11" edge="1" parent="1" source="quorum" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" value="Yes">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="750" y="1140" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge13" edge="1" parent="1" source="response" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.5;" target="end" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="dXUATNqszvzzZDUygm5u-2" edge="1" parent="1" source="dXUATNqszvzzZDUygm5u-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;" target="response" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="dXUATNqszvzzZDUygm5u-1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#66B2FF;strokeWidth=0;fontSize=14;" value="Save object metadata, ordered hashes, version and dedup ref counts in PostgreSQL" vertex="1">
+          <mxGeometry height="60" width="260" x="630" y="1140" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

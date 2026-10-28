@@ -1,0 +1,87 @@
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: storage
+      POSTGRES_PASSWORD: storagepass
+      POSTGRES_DB: storage
+    volumes:
+      - postgres_storage:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U storage -d storage"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://storage:storagepass@postgres:5432/storage
+      API_KEY: midterm-secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  storage1:
+    build:
+      context: .
+      dockerfile: storage/Dockerfile
+    environment:
+      NODE_ID: storage1
+      DATA_DIR: /data
+      GATEWAY_URL: http://gateway:8000
+    volumes:
+      - storage1_data:/data
+    depends_on:
+      - gateway
+
+  storage2:
+    build:
+      context: .
+      dockerfile: storage/Dockerfile
+    environment:
+      NODE_ID: storage2
+      DATA_DIR: /data
+      GATEWAY_URL: http://gateway:8000
+    volumes:
+      - storage2_data:/data
+    depends_on:
+      - gateway
+
+  storage3:
+    build:
+      context: .
+      dockerfile: storage/Dockerfile
+    environment:
+      NODE_ID: storage3
+      DATA_DIR: /data
+      GATEWAY_URL: http://gateway:8000
+    volumes:
+      - storage3_data:/data
+    depends_on:
+      - gateway
+
+  storage4:
+    build:
+      context: .
+      dockerfile: storage/Dockerfile
+    environment:
+      NODE_ID: storage4
+      DATA_DIR: /data
+      GATEWAY_URL: http://gateway:8000
+    volumes:
+      - storage4_data:/data
+    depends_on:
+      - gateway
+
+volumes:
+  postgres_storage:
+  storage1_data:
+  storage2_data:
+  storage3_data:
+  storage4_data:
