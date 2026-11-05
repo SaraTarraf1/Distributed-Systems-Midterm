@@ -18,14 +18,39 @@ services:
     build:
       context: .
       dockerfile: gateway/Dockerfile
-    ports:
-      - "8000:8000"
     environment:
-      DATABASE_URL: postgresql://storage:storagepass@postgres:5432/storage
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      DATABASE_URL: postgresql://storage:storagepass@postgres-ha-haproxy-1:5432/storage
       API_KEY: midterm-secret
     depends_on:
       postgres:
         condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+  gateway2:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      DATABASE_URL: postgresql://storage:storagepass@postgres-ha-haproxy-1:5432/storage
+      API_KEY: midterm-secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - gateway
+      - gateway2
 
   storage1:
     build:
@@ -34,11 +59,11 @@ services:
     environment:
       NODE_ID: storage1
       DATA_DIR: /data
-      GATEWAY_URL: http://gateway:8000
+      GATEWAY_URL: http://nginx:80
     volumes:
       - storage1_data:/data
     depends_on:
-      - gateway
+      - nginx
 
   storage2:
     build:
@@ -47,11 +72,11 @@ services:
     environment:
       NODE_ID: storage2
       DATA_DIR: /data
-      GATEWAY_URL: http://gateway:8000
+      GATEWAY_URL: http://nginx:80
     volumes:
       - storage2_data:/data
     depends_on:
-      - gateway
+      - nginx
 
   storage3:
     build:
@@ -60,11 +85,11 @@ services:
     environment:
       NODE_ID: storage3
       DATA_DIR: /data
-      GATEWAY_URL: http://gateway:8000
+      GATEWAY_URL: http://nginx:80
     volumes:
       - storage3_data:/data
     depends_on:
-      - gateway
+      - nginx
 
   storage4:
     build:
@@ -73,15 +98,92 @@ services:
     environment:
       NODE_ID: storage4
       DATA_DIR: /data
-      GATEWAY_URL: http://gateway:8000
+      GATEWAY_URL: http://nginx:80
     volumes:
       - storage4_data:/data
     depends_on:
-      - gateway
+      - nginx
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.10
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.security.http.ssl.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    hostname: storage-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: storage
+      RABBITMQ_DEFAULT_PASS: storagepass
+    ports:
+      - "127.0.0.1:15673:15672"
+    volumes:
+      - rabbitmq_storage:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  worker1:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: storage
+      RABBITMQ_PASSWORD: storagepass
+      DATABASE_URL: postgresql://storage:storagepass@postgres-ha-haproxy-1:5432/storage
+      GATEWAY_URL: http://nginx:80
+      API_KEY: midterm-secret
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker2:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: storage
+      RABBITMQ_PASSWORD: storagepass
+      DATABASE_URL: postgresql://storage:storagepass@postgres-ha-haproxy-1:5432/storage
+      GATEWAY_URL: http://nginx:80
+      API_KEY: midterm-secret
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+  ui:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5174:80"
+    depends_on:
+      - nginx
+    restart: unless-stopped
 volumes:
   postgres_storage:
   storage1_data:
   storage2_data:
   storage3_data:
   storage4_data:
+  elasticsearch_data:
+  rabbitmq_storage:

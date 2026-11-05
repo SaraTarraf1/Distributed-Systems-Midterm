@@ -1,0 +1,1 @@
+﻿{"spec":{"template":{"spec":{"containers":[{"name":"storage","livenessProbe":{"periodSeconds":5,"failureThreshold":3,"tcpSocket":{"port":9999},"initialDelaySeconds":5}}]}}}}

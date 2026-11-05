@@ -1,0 +1,67 @@
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: storage
+spec:
+  serviceName: storage
+  replicas: 4
+
+  selector:
+    matchLabels:
+      app: storage
+
+  template:
+    metadata:
+      labels:
+        app: storage
+
+    spec:
+      containers:
+        - name: storage
+          image: distributed-storage-node:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - containerPort: 8000
+              name: http
+
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+            - name: DATA_DIR
+              value: /data
+
+            - name: GATEWAY_URL
+              value: http://gateway:8000
+
+          volumeMounts:
+            - name: storage-data
+              mountPath: /data
+
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+
+  volumeClaimTemplates:
+    - metadata:
+        name: storage-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi

@@ -1,4 +1,3 @@
-
 import hashlib
 import io
 import json
@@ -11,8 +10,9 @@ import shutil
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from threading import Lock
-
+from threading import Thread
+from chunking import content_defined_chunking
+import elasticsearch_index as es_index
 import httpx
 import psycopg
 from collections import defaultdict, deque
@@ -22,6 +22,10 @@ from fastapi import (
 )
 from fastapi.responses import Response, StreamingResponse
 from psycopg.types.json import Jsonb
+from monitoring import (
+    metrics_middleware, metrics_response, update_disk_metrics,
+    update_degraded_metrics, record_repairs,
+)
 
 app = FastAPI(title="Distributed Object Storage Gateway")
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,7 +46,7 @@ rate_lock = threading.Lock()
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    if request.url.path.startswith("/internal/"):
+    if request.url.path.startswith("/internal/") or request.url.path == "/metrics":
         return await call_next(request)
 
     api_key = request.headers.get("x-api-key", "anonymous")
@@ -65,6 +69,15 @@ async def rate_limit_middleware(request: Request, call_next):
 
     return await call_next(request)
 
+
+app.middleware("http")(metrics_middleware)
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    return metrics_response()
+
+
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://storage:storagepass@postgres:5432/storage"
@@ -78,13 +91,37 @@ HEARTBEAT_TIMEOUT = 15
 UPLOAD_ROOT = Path(os.getenv("UPLOAD_ROOT", "/tmp/storage-multipart"))
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
-NODES = {
-    f"storage{i}": f"http://storage{i}:8000"
-    for i in range(1, 5)
-}
+STORAGE_MODE = os.getenv("STORAGE_MODE", "docker")
+STORAGE_SERVICE = os.getenv("STORAGE_SERVICE", "storage")
 
-heartbeats = {}
-heartbeat_lock = Lock()
+
+def valid_storage_node(node_id):
+    """Accept only expected node names for the selected deployment mode."""
+    if not isinstance(node_id, str):
+        return False
+    if STORAGE_MODE == "kubernetes":
+        prefix = "storage-"
+        return (node_id.startswith(prefix)
+                and node_id[len(prefix):].isdigit()
+                and len(node_id) <= 63)
+    return node_id in {f"storage{i}" for i in range(1, 5)}
+
+
+def get_nodes():
+    """Return configured nodes, including registered but temporarily offline pods."""
+    if STORAGE_MODE == "kubernetes":
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT node_id FROM storage_nodes ORDER BY node_id"
+            ).fetchall()
+        return {
+            node_id: f"http://{node_id}.{STORAGE_SERVICE}:8000"
+            for (node_id,) in rows if valid_storage_node(node_id)
+        }
+    return {
+        f"storage{i}": f"http://storage{i}:8000"
+        for i in range(1, 5)
+    }
 
 
 def sha256(data: bytes) -> str:
@@ -93,6 +130,28 @@ def sha256(data: bytes) -> str:
 
 def db():
     return psycopg.connect(DATABASE_URL)
+
+
+def sync_object_to_elasticsearch(bucket: str, key: str):
+    """Best-effort post-commit index update; /search/elasticsearch/sync can reconcile."""
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT size, version, created_at, tags FROM objects WHERE bucket=%s AND key=%s",
+                (bucket, key)
+            ).fetchone()
+        if row:
+            es_index.ensure_index()
+            es_index.index_object(bucket, key, *row)
+    except (httpx.HTTPError, ValueError) as exc:
+        print(f"[ELASTICSEARCH] Index update pending for {bucket}/{key}: {exc}", flush=True)
+
+
+def remove_object_from_elasticsearch(bucket: str, key: str):
+    try:
+        es_index.remove_object(bucket, key)
+    except (httpx.HTTPError, ValueError) as exc:
+        print(f"[ELASTICSEARCH] Delete update pending for {bucket}/{key}: {exc}", flush=True)
 
 
 def require_key(x_api_key: str | None = Header(default=None)):
@@ -121,11 +180,20 @@ def initialize_database():
             )
         """)
         conn.execute("ALTER TABLE objects ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '{}'::jsonb")
+        conn.execute("ALTER TABLE objects ADD COLUMN IF NOT EXISTS chunking TEXT NOT NULL DEFAULT 'fixed'")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chunks (
                 hash TEXT PRIMARY KEY,
                 size BIGINT NOT NULL,
                 ref_count BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS storage_nodes (
+                node_id TEXT PRIMARY KEY,
+                last_seen TIMESTAMPTZ NOT NULL,
+                free_space BIGINT NOT NULL DEFAULT 0,
+                chunk_count BIGINT NOT NULL DEFAULT 0
             )
         """)
 
@@ -135,6 +203,13 @@ def startup():
     for attempt in range(20):
         try:
             initialize_database()
+            repair_thread = Thread(target=automatic_repair_loop, daemon=True)
+            repair_thread.start()
+            print("[AUTO REPAIR] Background worker started", flush=True)
+
+            scrubber_thread = Thread(target=background_scrubber_loop, daemon=True)
+            scrubber_thread.start()
+            print("[SCRUBBER] Background integrity worker started", flush=True)
             return
         except psycopg.OperationalError:
             time.sleep(2)
@@ -144,28 +219,37 @@ def startup():
 @app.post("/internal/heartbeat")
 def receive_heartbeat(payload: dict):
     node_id = payload.get("node_id")
-
-    if node_id not in NODES:
+    if not valid_storage_node(node_id):
         raise HTTPException(400, "Unknown storage node")
 
-    with heartbeat_lock:
-        heartbeats[node_id] = {
-            "last_seen": time.time(),
-            "free_space": payload.get("free_space", 0),
-            "chunk_count": payload.get("chunk_count", 0)
-        }
+    try:
+        free_space = int(payload.get("free_space") or 0)
+        chunk_count = int(payload.get("chunk_count") or 0)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid heartbeat metrics")
+    if free_space < 0 or chunk_count < 0:
+        raise HTTPException(400, "Heartbeat metrics must be nonnegative")
 
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO storage_nodes (node_id, last_seen, free_space, chunk_count)
+            VALUES (%s, NOW(), %s, %s)
+            ON CONFLICT (node_id) DO UPDATE SET
+                last_seen = NOW(),
+                free_space = EXCLUDED.free_space,
+                chunk_count = EXCLUDED.chunk_count
+        """, (node_id, free_space, chunk_count))
     return {"status": "registered"}
 
 
 def active_nodes():
-    now = time.time()
-
-    with heartbeat_lock:
-        return sorted(
-            node for node, info in heartbeats.items()
-            if now - info["last_seen"] <= HEARTBEAT_TIMEOUT
-        )
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT node_id FROM storage_nodes
+            WHERE last_seen >= NOW() - (%s * INTERVAL '1 second')
+            ORDER BY node_id
+        """, (HEARTBEAT_TIMEOUT,)).fetchall()
+    return [row[0] for row in rows if valid_storage_node(row[0])]
 
 
 def ring_for(nodes):
@@ -212,16 +296,24 @@ def placement(chunk_hash: str, nodes=None, count=REPLICATION):
 def cluster_status(scan_objects: bool = False):
     healthy = active_nodes()
 
-    with heartbeat_lock:
-        nodes = [
-            {
-                "id": node,
-                "healthy": node in healthy,
-                "free_space": heartbeats.get(node, {}).get("free_space"),
-                "chunk_count": heartbeats.get(node, {}).get("chunk_count")
-            }
-            for node in NODES
-        ]
+    with db() as conn:
+        node_rows = conn.execute("""
+            SELECT node_id, free_space, chunk_count
+            FROM storage_nodes
+        """).fetchall()
+    node_info = {
+        node_id: {"free_space": free_space, "chunk_count": chunk_count}
+        for node_id, free_space, chunk_count in node_rows
+    }
+    nodes = [
+        {
+            "id": node,
+            "healthy": node in healthy,
+            "free_space": node_info.get(node, {}).get("free_space"),
+            "chunk_count": node_info.get(node, {}).get("chunk_count"),
+        }
+        for node in get_nodes()
+    ]
 
     with db() as conn:
         records = conn.execute(
@@ -239,7 +331,7 @@ def cluster_status(scan_objects: bool = False):
                 copies = 0
                 for node in healthy:
                     try:
-                        result = client.head(f"{NODES[node]}/chunks/{chunk_hash}")
+                        result = client.head(f"{get_nodes()[node]}/chunks/{chunk_hash}")
                         if result.status_code == 200:
                             copies += 1
                     except httpx.HTTPError:
@@ -251,9 +343,13 @@ def cluster_status(scan_objects: bool = False):
             degraded += int(object_degraded)
             unavailable += int(object_unavailable)
 
+    update_disk_metrics(nodes)
+    if scan_objects:
+        update_degraded_metrics(degraded)
+
     return {
         "healthy_nodes": len(healthy),
-        "total_nodes": len(NODES),
+        "total_nodes": len(get_nodes()),
         "nodes": nodes,
         "degraded_objects": degraded if scan_objects else None,
         "unavailable_objects": unavailable if scan_objects else None,
@@ -287,7 +383,7 @@ def write_chunk(chunk_hash: str, data: bytes):
         for node in targets:
             try:
                 response = client.put(
-                    f"{NODES[node]}/chunks/{chunk_hash}",
+                    f"{get_nodes()[node]}/chunks/{chunk_hash}",
                     content=data
                 )
                 if response.status_code == 200:
@@ -316,7 +412,7 @@ def read_chunk(chunk_hash: str):
         for node in candidates:
             try:
                 response = client.get(
-                    f"{NODES[node]}/chunks/{chunk_hash}"
+                    f"{get_nodes()[node]}/chunks/{chunk_hash}"
                 )
 
                 if (
@@ -335,6 +431,54 @@ def read_chunk(chunk_hash: str):
         503,
         f"Read quorum not reached for chunk {chunk_hash}"
     )
+
+
+def cleanup_unreferenced_chunks():
+    """Clean zero-reference chunks (run only while writes/deletes are paused).
+
+    A chunk's database record is retained when any node cannot confirm
+    deletion, allowing the next cleanup run to retry it.
+    """
+    cleaned = 0
+    pending = 0
+
+    # Lock the candidate rows while deleting their replicas so a concurrent
+    # metadata transaction cannot increment these reference counts.
+    # For this prototype, pause all uploads and deletions during cleanup.
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT hash FROM chunks WHERE ref_count <= 0 FOR UPDATE"
+        ).fetchall()
+
+        with httpx.Client(timeout=10) as client:
+            for (chunk_hash,) in rows:
+                confirmed = True
+                for node_url in get_nodes().values():
+                    try:
+                        response = client.delete(
+                            f"{node_url}/chunks/{chunk_hash}"
+                        )
+                        # 404 means the chunk was already absent on this node.
+                        if response.status_code not in (200, 204, 404):
+                            confirmed = False
+                    except httpx.HTTPError:
+                        confirmed = False
+
+                if confirmed:
+                    result = conn.execute(
+                        "DELETE FROM chunks WHERE hash=%s AND ref_count <= 0",
+                        (chunk_hash,),
+                    )
+                    cleaned += result.rowcount
+                else:
+                    pending += 1
+
+    return {"cleaned_chunks": cleaned, "pending_chunks": pending}
+
+
+@app.post("/cluster/cleanup", dependencies=[Depends(require_key)])
+def cleanup_cluster():
+    return cleanup_unreferenced_chunks()
 
 
 @app.post("/buckets/{bucket}", dependencies=[Depends(require_key)])
@@ -362,11 +506,24 @@ def list_buckets():
     "/objects/{bucket}/{key:path}",
     dependencies=[Depends(require_key)]
 )
-async def upload_object(bucket: str, key: str, file: UploadFile = File(...), tags_json: str = "{}"):
-    return await store_object(bucket, key, file, tags_json)
+async def upload_object(
+    bucket: str,
+    key: str,
+    file: UploadFile = File(...),
+    tags_json: str = "{}",
+    chunking: str = "fixed"
+):
+    return await store_object(
+        bucket, key, file, tags_json, chunking
+    )
 
-
-async def store_object(bucket: str, key: str, file: UploadFile, tags_json: str = "{}"):
+async def store_object(
+    bucket: str,
+    key: str,
+    file: UploadFile,
+    tags_json: str = "{}",
+    chunking: str = "fixed"
+):
     try:
         tags = json.loads(tags_json)
         if not isinstance(tags, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in tags.items()):
@@ -380,19 +537,31 @@ async def store_object(bucket: str, key: str, file: UploadFile, tags_json: str =
     sizes = {}
     total_size = 0
 
-    # Stream from the uploaded file in fixed 1 MiB chunks.
-    while True:
-        data = await file.read(CHUNK_SIZE)
+    if chunking not in ("fixed", "cdc"):
+        raise HTTPException(400, "chunking must be 'fixed' or 'cdc'")
 
-        if not data:
-            break
+    if chunking == "fixed":
+        # Keep the existing memory-efficient fixed-size upload.
+        while True:
+            data = await file.read(CHUNK_SIZE)
+            if not data:
+                break
 
-        chunk_hash = sha256(data)
-        write_chunk(chunk_hash, data)
-
-        chunks.append(chunk_hash)
-        sizes[chunk_hash] = len(data)
-        total_size += len(data)
+            chunk_hash = sha256(data)
+            write_chunk(chunk_hash, data)
+            chunks.append(chunk_hash)
+            sizes[chunk_hash] = len(data)
+            total_size += len(data)
+    else:
+        # Initial CDC integration: suitable for functional testing.
+        # TODO: make CDC incremental before 100 MB–1 GB benchmarks.
+        file_data = await file.read()
+        for data in content_defined_chunking(file_data):
+            chunk_hash = sha256(data)
+            write_chunk(chunk_hash, data)
+            chunks.append(chunk_hash)
+            sizes[chunk_hash] = len(data)
+            total_size += len(data)
 
     with db() as conn:
         bucket_exists = conn.execute(
@@ -426,16 +595,19 @@ async def store_object(bucket: str, key: str, file: UploadFile, tags_json: str =
         version = old[1] + 1 if old else 1
 
         conn.execute("""
-            INSERT INTO objects(bucket, key, size, version, chunk_hashes, tags)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO objects(bucket, key, size, version, chunk_hashes, tags, chunking)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(bucket, key)
             DO UPDATE SET
                 size=EXCLUDED.size,
                 version=EXCLUDED.version,
                 chunk_hashes=EXCLUDED.chunk_hashes,
                 tags=EXCLUDED.tags,
+                chunking=EXCLUDED.chunking,
                 created_at=NOW()
-        """, (bucket, key, total_size, version, Jsonb(chunks), Jsonb(tags)))
+        """, (bucket, key, total_size, version, Jsonb(chunks), Jsonb(tags), chunking))
+
+    sync_object_to_elasticsearch(bucket, key)
 
     return {
         "bucket": bucket,
@@ -445,6 +617,7 @@ async def store_object(bucket: str, key: str, file: UploadFile, tags_json: str =
         "chunks": len(chunks),
         "unique_chunks": len(set(chunks)),
         "replication_factor": REPLICATION,
+        "chunking": chunking,
         "tags": tags
     }
 
@@ -452,7 +625,7 @@ async def store_object(bucket: str, key: str, file: UploadFile, tags_json: str =
 def get_object_row(bucket: str, key: str):
     with db() as conn:
         row = conn.execute("""
-            SELECT size, version, chunk_hashes, created_at, tags
+            SELECT size, version, chunk_hashes, created_at, tags, chunking
             FROM objects WHERE bucket=%s AND key=%s
         """, (bucket, key)).fetchone()
 
@@ -467,7 +640,7 @@ def get_object_row(bucket: str, key: str):
     dependencies=[Depends(require_key)]
 )
 def object_metadata(bucket: str, key: str):
-    size, version, chunks, created_at, tags = get_object_row(bucket, key)
+    size, version, chunks, created_at, tags, chunking = get_object_row(bucket, key)
 
     return {
         "bucket": bucket,
@@ -475,6 +648,7 @@ def object_metadata(bucket: str, key: str):
         "size": size,
         "version": version,
         "chunk_hashes": chunks,
+        "chunking": chunking,
         "created_at": created_at.isoformat(),
         "tags": tags
     }
@@ -485,7 +659,7 @@ def object_metadata(bucket: str, key: str):
     dependencies=[Depends(require_key)]
 )
 def download_object(bucket: str, key: str, request: Request):
-    size, version, chunks, created_at, tags = get_object_row(bucket, key)
+    size, version, chunks, created_at, tags, chunking = get_object_row(bucket, key)
 
     range_header = request.headers.get("range")
     start = 0
@@ -594,6 +768,51 @@ def search_objects(
     ]}
 
 
+@app.post("/search/elasticsearch/sync", dependencies=[Depends(require_key)])
+def synchronize_elasticsearch():
+    """Rebuild the index from PostgreSQL; run with writes paused for consistency."""
+    try:
+        es_index.ensure_index()
+        # Remove stale index documents as well as adding existing metadata.
+        with httpx.Client(timeout=30) as client:
+            response = client.post(
+                f"{es_index.ES_URL}/{es_index.INDEX}/_delete_by_query",
+                params={"refresh": "true", "conflicts": "proceed", "wait_for_completion": "true"},
+                json={"query": {"match_all": {}}},
+            )
+            response.raise_for_status()
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT bucket, key, size, version, created_at, tags FROM objects ORDER BY bucket, key"
+            ).fetchall()
+        for bucket, key, size, version, created_at, tags in rows:
+            es_index.index_object(bucket, key, size, version, created_at, tags)
+        with httpx.Client(timeout=15) as client:
+            response = client.post(f"{es_index.ES_URL}/{es_index.INDEX}/_refresh")
+            response.raise_for_status()
+        return {"status": "synchronized", "indexed_objects": len(rows), "index": es_index.INDEX}
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, f"Elasticsearch unavailable: {exc}") from exc
+
+
+@app.get("/search/elasticsearch", dependencies=[Depends(require_key)])
+def search_objects_elasticsearch(
+    prefix: str = "", min_size: int = 0, max_size: int | None = None,
+    created_after: datetime | None = None, created_before: datetime | None = None,
+    tag_key: str | None = None, tag_value: str | None = None
+):
+    if (tag_key is None) != (tag_value is None):
+        raise HTTPException(400, "Provide both tag_key and tag_value")
+    if min_size < 0 or (max_size is not None and max_size < min_size):
+        raise HTTPException(400, "Invalid size range")
+    try:
+        results = es_index.search(prefix, min_size, max_size, created_after,
+                                  created_before, tag_key, tag_value)
+        return {"results": results, "engine": "elasticsearch", "limit": 1000}
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, f"Elasticsearch unavailable: {exc}") from exc
+
+
 @app.delete(
     "/objects/{bucket}/{key:path}",
     dependencies=[Depends(require_key)]
@@ -619,6 +838,7 @@ def delete_object(bucket: str, key: str):
             (bucket, key)
         )
 
+    remove_object_from_elasticsearch(bucket, key)
     return {"status": "metadata_deleted"}
 
 
@@ -668,7 +888,7 @@ async def upload_part(bucket: str, key: str, part_number: int, upload_id: str, r
 
 
 @app.post("/multipart/{bucket}/{key:path}/complete", dependencies=[Depends(require_key)])
-async def complete_multipart(bucket: str, key: str, upload_id: str, tags_json: str = "{}"):
+async def complete_multipart(bucket: str, key: str, upload_id: str, tags_json: str = "{}", chunking: str = "fixed"):
     folder = multipart_folder(upload_id, bucket, key)
     parts = sorted(folder.glob("part-[0-9][0-9][0-9][0-9][0-9]"))
     if not parts:
@@ -683,7 +903,7 @@ async def complete_multipart(bucket: str, key: str, upload_id: str, tags_json: s
                 shutil.copyfileobj(source, combined, length=1024 * 1024)
         combined.seek(0)
         upload = UploadFile(file=combined, filename=key)
-        result = await store_object(bucket, key, upload, tags_json)
+        result = await store_object(bucket, key, upload, tags_json, chunking)
     shutil.rmtree(folder)
     return {"status": "completed", "upload_id": upload_id, **result}
 
@@ -693,6 +913,84 @@ def abort_multipart(bucket: str, key: str, upload_id: str):
     folder = multipart_folder(upload_id, bucket, key)
     shutil.rmtree(folder)
     return {"status": "aborted"}
+
+
+@app.post("/cluster/rebalance", dependencies=[Depends(require_key)])
+def rebalance_cluster():
+    """Reconcile referenced chunks with the current consistent-hash ring.
+
+    Run while uploads/deletes and other maintenance operations are paused.
+    Only removes obsolete replicas after all target replicas are verified.
+    """
+    healthy = active_nodes()
+    if len(healthy) < REPLICATION:
+        raise HTTPException(503, "At least three healthy storage nodes required")
+
+    with db() as conn:
+        hashes = [row[0] for row in conn.execute(
+            "SELECT hash FROM chunks WHERE ref_count > 0"
+        ).fetchall()]
+
+    copied = 0
+    removed = 0
+    failed = 0
+    with httpx.Client(timeout=30) as client:
+        for chunk_hash in hashes:
+            targets = set(placement(chunk_hash, healthy))
+            verified = set()
+            source_data = None
+            for node in healthy:
+                try:
+                    response = client.get(f"{get_nodes()[node]}/chunks/{chunk_hash}")
+                    if response.status_code == 200 and sha256(response.content) == chunk_hash:
+                        verified.add(node)
+                        if source_data is None:
+                            source_data = response.content
+                except httpx.HTTPError:
+                    pass
+
+            if source_data is None:
+                failed += 1
+                continue
+
+            for node in targets - verified:
+                try:
+                    response = client.put(
+                        f"{get_nodes()[node]}/chunks/{chunk_hash}",
+                        content=source_data,
+                    )
+                    if response.status_code == 200:
+                        # Verify the stored replica before considering cleanup.
+                        check = client.get(f"{get_nodes()[node]}/chunks/{chunk_hash}")
+                        if check.status_code == 200 and sha256(check.content) == chunk_hash:
+                            verified.add(node)
+                            copied += 1
+                        else:
+                            failed += 1
+                    else:
+                        failed += 1
+                except httpx.HTTPError:
+                    failed += 1
+
+            if targets.issubset(verified):
+                for node in verified - targets:
+                    try:
+                        response = client.delete(f"{get_nodes()[node]}/chunks/{chunk_hash}")
+                        if response.status_code in (200, 204, 404):
+                            removed += 1
+                        else:
+                            failed += 1
+                    except httpx.HTTPError:
+                        failed += 1
+
+    return {
+        "status": "completed" if failed == 0 else "partial",
+        "rebalanced_replicas": copied,
+        "removed_obsolete_replicas": removed,
+        "failed_operations": failed,
+        "healthy_nodes": len(healthy),
+        "scanned_chunks": len(hashes),
+    }
 
 
 @app.post("/cluster/repair", dependencies=[Depends(require_key)])
@@ -725,7 +1023,7 @@ def repair_cluster():
             for node in healthy:
                 try:
                     response = client.get(
-                        f"{NODES[node]}/chunks/{chunk_hash}"
+                        f"{get_nodes()[node]}/chunks/{chunk_hash}"
                     )
                     if (
                         response.status_code == 200
@@ -746,7 +1044,7 @@ def repair_cluster():
 
                 try:
                     response = client.put(
-                        f"{NODES[node]}/chunks/{chunk_hash}",
+                        f"{get_nodes()[node]}/chunks/{chunk_hash}",
                         content=source_data
                     )
                     if response.status_code == 200:
@@ -756,9 +1054,99 @@ def repair_cluster():
                 except httpx.HTTPError:
                     failed += 1
 
+    record_repairs(repaired)
+
     return {
         "repaired_replicas": repaired,
         "failed_repairs": failed,
         "healthy_nodes": len(healthy)
     }
+
+def automatic_repair_loop():
+    """
+    Periodically repair missing replicas.
+    """
+    while True:
+        time.sleep(30)
+
+        try:
+            healthy = active_nodes()
+
+            if len(healthy) < REPLICATION:
+                print(
+                    "[AUTO REPAIR] Waiting for at least "
+                    "3 healthy storage nodes",
+                    flush=True
+                )
+                continue
+
+            result = repair_cluster()
+
+            print(
+                "[AUTO REPAIR] "
+                f"Repaired: {result['repaired_replicas']}, "
+                f"Failed: {result['failed_repairs']}",
+                flush=True
+            )
+
+        except Exception as exc:
+            print(
+                f"[AUTO REPAIR] Error: {exc}",
+                flush=True
+            )
+
+
+
+
+def scrub_cluster():
+    """Verify SHA-256 integrity of expected replicas of referenced chunks."""
+    with db() as conn:
+        hashes = [row[0] for row in conn.execute(
+            "SELECT hash FROM chunks WHERE ref_count > 0"
+        ).fetchall()]
+
+    healthy = active_nodes()
+    verified = corrupted = missing = errors = 0
+
+    with httpx.Client(timeout=15) as client:
+        for chunk_hash in hashes:
+            for node in placement(chunk_hash, healthy):
+                try:
+                    response = client.head(f"{get_nodes()[node]}/chunks/{chunk_hash}")
+                    if response.status_code == 200:
+                        verified += 1
+                    elif response.status_code == 409:
+                        corrupted += 1
+                    elif response.status_code == 404:
+                        missing += 1
+                    else:
+                        errors += 1
+                except httpx.HTTPError:
+                    errors += 1
+
+    return {
+        "verified_replicas": verified,
+        "corrupted_replicas": corrupted,
+        "missing_replicas": missing,
+        "errors": errors,
+        "healthy_nodes": len(healthy),
+    }
+
+
+def background_scrubber_loop():
+    """Run integrity checks every 60 seconds."""
+    while True:
+        time.sleep(60)
+        try:
+            result = scrub_cluster()
+            print(
+                "[SCRUBBER] "
+                f"Verified: {result['verified_replicas']}, "
+                f"Corrupted: {result['corrupted_replicas']}, "
+                f"Missing: {result['missing_replicas']}, "
+                f"Errors: {result['errors']}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[SCRUBBER] Error: {exc}", flush=True)
 
